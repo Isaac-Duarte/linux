@@ -17,18 +17,18 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 FUNCTIONS = {
-    'drivers/gpu/drm/apple/dcp-fabric-core.h': ['dcp_fabric_dpin_slot'],
+    'drivers/gpu/drm/apple/dcp-fabric-core.h': ['dcp_fabric_dpin_slot', 'dcp_fabric_tunnel_owner'],
     'drivers/gpu/drm/apple/dcp-fabric-session.h': ['dcp_fabric_binding_request'],
     'drivers/gpu/drm/apple/dcp-fabric-core.c': ['dcp_fabric_tunnel_slot'],
     'drivers/gpu/drm/apple/dcp-fabric.c': [
-        'dcp_typec_route_no_dp_alt', 'dcp_is_t8132_ext', 'dcp_typec_port_untileable',
+        'dcp_typec_route_no_dp_alt', 'dcp_is_t8132_ext', 'dcp_typec_port_untileable', 'dcp_tb_slot',
         'dcp_tb_split_locked', 'dcp_tb_dispatch_request'],
 }
 CASES = ['t6030-dpin1-alone', 't6030-dpin1-alone-before-services',
          't6030-dpin1-with-external-owner', 't6030-dpin1-then-dpin0',
          't6030-dpin0-then-dpin1', 't6030-split-off', 't6030-inactive-dpin1',
          't6050-dpin1-alone', 't6050-dpin1-with-tile-hint', 't6050-dpin3-alone',
-         't6050-dpin3-shares-slot',
+         't6050-dpin3-own-slot', 't6030-dpin3-shares-slot',
          'internal-dpin1-alone-waits', 'internal-not-ready-waits',
          'mixed-routes-wait', 'no-routes-wait', 'internal-tile-hint-pending',
          'internal-tiled-join', 'internal-owner-without-port1',
@@ -56,9 +56,12 @@ MUTATIONS = [
     ('dcpext-tileable', '!dcp_is_t8132_ext(route->dcp) &&\n', ''),
     # Firmware 27 pipelines drive one DP IN each: never a tile.
     ('fw27-tileable', ' &&\n\t\t    route->dcp->fw_compat != DCP_FIRMWARE_V_27_0)', ')'),
-    # DP IN 3 is a second stream, in DP IN 1's slot.
-    ('dpin3-primary-slot', 'slot = dcp_fabric_dpin_slot(dpin) ? &port->secondary_owner : &port->owner;',
-     'slot = dpin == 1 ? &port->secondary_owner : &port->owner;'),
+    # Elsewhere DP IN 3 is a second stream, in DP IN 1's slot.
+    ('dpin3-primary-slot', 'return per_dpin ? dpin : dcp_fabric_dpin_slot(dpin);',
+     'return per_dpin ? dpin : dpin == 1;'),
+    # T6050 (fixed CRTCs): DP IN 2 and 3 have slots of their own.
+    ('shared-dpin-slots', 'bool per_dpin = dpin < DCP_FABRIC_DPIN_MAX && dcp_typec_fixed_crtcs();',
+     'bool per_dpin = false;'),
     ('gate-always', 'if (dcp_typec_port_untileable(port))',
      'if (true || dcp_typec_port_untileable(port))'),
 ]
@@ -70,12 +73,16 @@ def function(source, name):
                       source, re.M | re.S)
     if not match:
         raise ValueError(name)
+    start = match.start()
+    prev = source.rfind('\n', 0, start - 1) + 1
+    if start and re.fullmatch(r'static [^;{}()]*\*', source[prev:start - 1]):
+        start = prev
     pos = source.index('{', match.start()) + 1
     depth = 1
     while depth:
         depth += (source[pos] == '{') - (source[pos] == '}')
         pos += 1
-    return source[match.start():pos] + '\n'
+    return source[start:pos] + '\n'
 
 
 def build(out, bodies, tag):

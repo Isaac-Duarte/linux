@@ -3,8 +3,9 @@
  * Host fixture for the Thunderbolt DPIN1 dispatch and tiled-display split
  * admission. The production bodies of dcp_tb_dispatch_request(),
  * dcp_tb_split_locked(), dcp_typec_port_untileable(),
- * dcp_typec_route_no_dp_alt(), dcp_fabric_tunnel_slot(),
- * dcp_fabric_dpin_slot() and dcp_fabric_binding_request() are pasted in,
+ * dcp_typec_route_no_dp_alt(), dcp_tb_slot(), dcp_fabric_tunnel_slot(),
+ * dcp_fabric_dpin_slot(), dcp_fabric_tunnel_owner() and
+ * dcp_fabric_binding_request() are pasted in,
  * after DCP_FABRIC_DPIN_MAX and enum dcp_firmware_version;
  * only what lies below them (join, connect, teardown, release, attach,
  * rebalance) is stubbed, and every stub call is recorded.
@@ -29,6 +30,7 @@ typedef uint8_t u8;
 #define time_before(a, b) ((long)((a) - (b)) < 0)
 #define dev_warn(dev, ...) fprintf(stderr, __VA_ARGS__)
 #define EXPORT_SYMBOL_GPL(x)
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 /* FABRIC_DEFINES */
 static inline unsigned int dcp_fabric_dpin_slot(unsigned int dpin);
@@ -94,7 +96,7 @@ struct dcp_fabric_port {
 	unsigned long key;
 	struct dcp_fabric_port *next;
 	struct dcp_fabric_route *routes;
-	struct dcp_fabric_route *owner[2];
+	struct dcp_fabric_route *owner[DCP_FABRIC_DPIN_MAX];
 	struct dcp_fabric_route *preferred;
 	u32 candidate_crtcs[2];
 	bool wanted, hpd;
@@ -114,7 +116,13 @@ struct apple_dcp_typec_route {
 struct apple_dcp_typec_port {
 	struct dcp_fabric_port core;
 	struct list_head routes;
-	struct apple_dcp_typec_route *owner, *secondary_owner;
+	union {
+		struct {
+			struct apple_dcp_typec_route *owner, *secondary_owner;
+			struct apple_dcp_typec_route *dpin_owner[2];
+		};
+		struct apple_dcp_typec_route *slots[DCP_FABRIC_DPIN_MAX];
+	};
 	struct apple_dcp *split_dcp;
 	unsigned long tile_hint_deadline;
 };
@@ -131,6 +139,13 @@ struct dcp_tb_attach_context {
 struct dcp_fabric_attach_ops { int unused; };
 
 static bool tiled_split = true;
+static bool fixed_crtcs;
+static bool dcp_typec_fixed_crtcs(void)
+{
+	return fixed_crtcs;
+}
+static struct apple_dcp_typec_route **
+dcp_tb_slot(struct apple_dcp_typec_port *port, unsigned int dpin);
 static unsigned long jiffies = 1000;
 static int dcp_typec_fabric_lock;
 static const struct dcp_fabric_attach_ops dcp_tb_attach_ops;
@@ -180,10 +195,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, unsigned int port)
 static int dcp_tb_release_locked(struct apple_dcp_typec_port *port, unsigned int dpin)
 {
 	st.release++;
-	if (dcp_fabric_dpin_slot(dpin))
-		port->secondary_owner = NULL;
-	else
-		port->owner = NULL;
+	*dcp_tb_slot(port, dpin) = NULL;
 	return 0;
 }
 
@@ -244,6 +256,7 @@ static void topology(enum kind kind, bool port1_ready)
 	/* T6050: pipelines on the AP's own display fabric, firmware 27 */
 	if (kind == T6050_FW27)
 		dcp_a.fw_compat = dcp_b.fw_compat = DCP_FIRMWARE_V_27_0;
+	fixed_crtcs = kind == T6050_FW27;
 	/* A T8132 dcpext is no external processor: only its compatible says so. */
 	np_a.compatible = np_b.compatible =
 		kind == T8132_DCPEXT ? "apple,t8132-dcpext" : "apple,dcp";
@@ -384,19 +397,29 @@ static void t6050_dpin1_with_tile_hint(void)
 	CHECK(st.attach == 1 && st.attach_dpin[0] == 1 && !st.join);
 }
 
-/* DP IN n and n + 2 share a stream slot: DP IN 3 is a second stream. */
+/* T6050 (fixed CRTCs): each DP IN has a slot of its own. */
 static void t6050_dpin3_alone(void)
 {
 	topology(T6050_FW27, true);
 	CHECK(request(3, true, 9) == 0);
 	CHECK(st.attach == 1 && st.attach_dpin[0] == 3);
-	CHECK(port.secondary_owner == &attach_route[3] && !port.owner);
+	CHECK(port.dpin_owner[1] == &attach_route[3] && !port.secondary_owner);
 	CHECK(!st.join && !st.teardown);
 }
 
-static void t6050_dpin3_shares_slot(void)
+static void t6050_dpin3_own_slot(void)
 {
 	topology(T6050_FW27, true);
+	CHECK(request(3, true, 9) == 0);
+	CHECK(request(1, true, 10) == 0);
+	CHECK(port.dpin_owner[1] == &attach_route[3] && port.secondary_owner == &attach_route[1]);
+	CHECK(!st.join && !st.teardown);
+}
+
+/* Elsewhere DP IN n and n + 2 share a stream slot: DP IN 3 is a second stream. */
+static void t6030_dpin3_shares_slot(void)
+{
+	topology(ALL_EXTERNAL, true);
 	CHECK(request(3, true, 9) == 0);
 	CHECK(request(1, true, 10) == -EADDRINUSE);
 	CHECK(st.attach == 1 && port.secondary_owner == &attach_route[3]);
@@ -535,7 +558,8 @@ static const struct { const char *name; void (*fn)(void); } cases[] = {
 	{ "t6050-dpin1-alone", t6050_dpin1_alone },
 	{ "t6050-dpin1-with-tile-hint", t6050_dpin1_with_tile_hint },
 	{ "t6050-dpin3-alone", t6050_dpin3_alone },
-	{ "t6050-dpin3-shares-slot", t6050_dpin3_shares_slot },
+	{ "t6050-dpin3-own-slot", t6050_dpin3_own_slot },
+	{ "t6030-dpin3-shares-slot", t6030_dpin3_shares_slot },
 	{ "internal-dpin1-alone-waits", internal_dpin1_alone_waits },
 	{ "internal-not-ready-waits", internal_not_ready_waits },
 	{ "mixed-routes-wait", mixed_routes_wait },

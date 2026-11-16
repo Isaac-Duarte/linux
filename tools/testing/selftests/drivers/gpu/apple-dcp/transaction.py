@@ -157,8 +157,14 @@ static int mux_control_deselect(struct mux_control *m) { (void)m;event('C');xbar
     '''+available
     actual=actual.replace(block(actual,'static bool dcp_typec_route_available('), 'static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *r) { (void)r;return false; }\n'+available+block(dcp,'static bool dcp_typec_route_available('),1)
     actual=actual.replace(block(actual,'static int dcp_typec_route_deactivate('),block(dcp,dcp.rindex('static int dcp_typec_route_deactivate(')),1)
+    route_set=block(dcp,'static int dcp_typec_route_set(')
+    if 'dcp_typec_port_tunneled(' in route_set:
+        # The port's owner slots: owner is slots[0], the rest stay empty here.
+        actual=actual.replace('struct apple_dcp_typec_route *owner,*target,',
+            'union { struct apple_dcp_typec_route *owner; struct apple_dcp_typec_route *slots[4]; };\n     struct apple_dcp_typec_route *target,',1)
+        route_set='#ifndef ARRAY_SIZE\n#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))\n#endif\n'+block(dcp,'static bool dcp_typec_port_tunneled(')+'\n'+route_set
     pos=actual.index('static struct typec_mux_dev phy_provider')
-    actual=actual[:pos]+block(dcp,'static bool dcp_typec_route_is_dp(')+'\n'+block(dcp,'static int dcp_typec_route_set(')+'\n'+actual[pos:]
+    actual=actual[:pos]+block(dcp,'static bool dcp_typec_route_is_dp(')+'\n'+route_set+'\n'+actual[pos:]
     actual=actual.replace(block(actual,'static int display_set('),'''static int display_set(struct typec_mux_dev *m,struct typec_mux_state *s) { event('S');return dcp_typec_route_set(m,s); }''',1)
     actual=actual.replace("(void)m;assert(s->mode==TYPEC_STATE_SAFE);event('L');", "(void)m;(void)s;event('L');",1)
     actual=actual.replace('connector=(struct connector){.connected=true};','connector=(struct connector){.connected=true};',1)

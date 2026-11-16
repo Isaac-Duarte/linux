@@ -10,6 +10,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 #define READ_ONCE(x) (x)
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define lockdep_assert_held(x) ((void)0)
 #define list_for_each_entry(r, head, link) \
 	for ((r) = *(head); (r); (r) = (r)->next)
@@ -48,8 +49,14 @@ struct apple_dcp_typec_route {
 struct apple_dcp_typec_port {
 	struct dcp_fabric_port core;
 	struct dcp_fabric_plan plan;
-	struct apple_dcp_typec_route *routes, *owner, *secondary_owner,
-		*preferred_route;
+	struct apple_dcp_typec_route *routes, *preferred_route;
+	/* The owner slots, as production: owner, secondary_owner, DP IN 2, 3. */
+	union {
+		struct {
+			struct apple_dcp_typec_route *owner, *secondary_owner;
+		};
+		struct apple_dcp_typec_route *slots[DCP_FABRIC_DPIN_MAX];
+	};
 	struct apple_connector *connector, *secondary_connector;
 	bool dp_wanted, dp_hpd, typec_yielded;
 };
